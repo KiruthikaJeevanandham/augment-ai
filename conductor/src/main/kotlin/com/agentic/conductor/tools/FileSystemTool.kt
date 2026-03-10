@@ -3,6 +3,9 @@ package com.agentic.conductor.tools
 import com.agentic.conductor.models.ToolResult
 import org.slf4j.LoggerFactory
 import java.io.File
+import java.nio.file.FileSystems
+import java.nio.file.PathMatcher
+import java.nio.file.Paths
 
 class FileSystemTool(private val config: FileSystemConfig) : Tool {
 
@@ -12,10 +15,14 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
     override suspend fun execute(action: String, params: Map<String, Any>): ToolResult {
         return when (action) {
             "read_file" -> readFile(params)
+            "read_files" -> readFiles(params)
             "write_file" -> writeFile(params)
+            "list_files" -> listFiles(params)
             "apply_changes" -> applyChanges(params)
             "apply_patch" -> applyPatch(params)
             "edit_file" -> editFile(params)
+            "apply_surgical_edits" -> applySurgicalEdits(params)
+            "filter_existing_paths" -> filterExistingPaths(params)
             "create_branch_name" -> createBranchName(params)
             else -> ToolResult(success = false, error = "Action '$action' not supported by FileSystemTool.")
         }
@@ -36,6 +43,82 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
         } catch (e: Exception) {
             logger.error("Failed to read file $path: ${e.message}", e)
             ToolResult(success = false, error = "Failed to read file: ${e.message}")
+        }
+    }
+
+    private fun readFiles(params: Map<String, Any>): ToolResult {
+        val paths = params["paths"] as? List<String>
+            ?: return ToolResult(success = false, error = "Missing 'paths' parameter. Expected a list of file paths.")
+
+        logger.info("Reading ${paths.size} files...")
+        val fileContents = mutableMapOf<String, String>()
+        val errors = mutableListOf<String>()
+
+        for (path in paths) {
+            try {
+                val file = File(config.basePath, path)
+                if (file.exists() && file.isFile) {
+                    fileContents[path] = file.readText()
+                } else {
+                    errors.add("File not found or not a file: $path")
+                }
+            } catch (e: Exception) {
+                errors.add("Failed to read $path: ${e.message}")
+            }
+        }
+
+        return if (errors.isEmpty()) {
+            ToolResult(success = true, data = fileContents)
+        } else {
+            ToolResult(success = true, data = mapOf("files" to fileContents, "errors" to errors))
+        }
+    }
+
+    private fun listFiles(params: Map<String, Any>): ToolResult {
+        val path = params["path"] as? String ?: "."
+        val recursive = params["recursive"] as? Boolean ?: false
+        val includePatterns = (params["include_patterns"] as? List<*>)?.filterIsInstance<String>().orEmpty()
+        val excludePatterns = (params["exclude_patterns"] as? List<*>)?.filterIsInstance<String>().orEmpty()
+        val maxDepth = (params["max_depth"] as? Number)?.toInt() ?: 10
+        val limit = (params["limit"] as? Number)?.toInt()
+        val filesOnly = params["files_only"] as? Boolean ?: false
+
+        logger.info("Listing files in: $path (recursive=$recursive)")
+        return try {
+            val rootDir = File(config.basePath, path)
+            if (!rootDir.exists() || !rootDir.isDirectory) {
+                return ToolResult(success = false, error = "Directory not found: $path")
+            }
+
+            val includeMatchers = includePatterns.takeIf { it.isNotEmpty() }?.map { buildGlobMatcher(it) }
+            val excludeMatchers = excludePatterns.takeIf { it.isNotEmpty() }?.map { buildGlobMatcher(it) }
+
+            val files = if (recursive) {
+                rootDir.walkTopDown()
+                    .onEnter { !it.name.startsWith(".") && it.name != "build" && it.name != "node_modules" && it.name != "target" }
+                    .maxDepth(maxDepth)
+                    .filter { !it.name.startsWith(".") }
+                    .filter { file -> !filesOnly || file.isFile }
+                    .map { it.relativeTo(rootDir).path }
+                    .filter { relPath ->
+                        val pathObj = Paths.get(relPath)
+                        val matchesInclude = includeMatchers?.any { matcher -> matcher.matches(pathObj) } ?: true
+                        val matchesExclude = excludeMatchers?.any { matcher -> matcher.matches(pathObj) } ?: false
+                        matchesInclude && !matchesExclude
+                    }
+                    .toList()
+            } else {
+                rootDir.listFiles()
+                    ?.filter { !it.name.startsWith(".") }
+                    ?.filter { file -> !filesOnly || file.isFile }
+                    ?.map { it.relativeTo(File(config.basePath)).path }
+                    ?: emptyList()
+            }
+            val limitedFiles = limit?.let { files.take(it) } ?: files
+            ToolResult(success = true, data = limitedFiles)
+        } catch (e: Exception) {
+            logger.error("Failed to list files in $path: ${e.message}", e)
+            ToolResult(success = false, error = "Failed to list files: ${e.message}")
         }
     }
 
@@ -102,6 +185,141 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
         return ToolResult(success = true)
     }
 
+    @Suppress("UNCHECKED_CAST")
+    private fun applySurgicalEdits(params: Map<String, Any>): ToolResult {
+        val edits = params["edits"] as? List<Map<String, String>>
+            ?: return ToolResult(success = false, error = "Missing or invalid 'edits' parameter. Expected a list of objects with 'path', 'search_pattern', and 'replacement'.")
+
+        logger.info("Applying ${edits.size} surgical edits across files...")
+        var successfulEdits = 0
+        val errors = mutableListOf<String>()
+
+        // Expand globs in file paths
+        val expandedEdits = mutableListOf<Map<String, String>>()
+        for (edit in edits) {
+            val pathPattern = edit["path"]
+            if (pathPattern == null) {
+                errors.add("Skipping edit with missing path")
+                continue
+            }
+
+            if (pathPattern.contains("*") || pathPattern.contains("?")) {
+                // It's a glob pattern, expand it
+                val rootDir = File(config.basePath)
+                val matches = try {
+                    expandGlob(pathPattern, rootDir, 10)
+                } catch (e: Exception) {
+                    errors.add("Failed to expand glob '$pathPattern': ${e.message}")
+                    emptyList()
+                }
+
+                if (matches.isEmpty()) {
+                    logger.warn("  - No files matched glob pattern: $pathPattern")
+                    // We don't error here, just skip
+                } else {
+                    logger.info("  - Expanded glob '$pathPattern' to ${matches.size} files")
+                    for (match in matches) {
+                        expandedEdits.add(edit + ("path" to match))
+                    }
+                }
+            } else {
+                expandedEdits.add(edit)
+            }
+        }
+
+        // Group edits by file path to minimize file I/O
+        val editsByFile = expandedEdits.groupBy { it["path"] }
+
+        for ((path, fileEdits) in editsByFile) {
+            if (path == null) continue // Should be handled above
+
+            val file = File(config.basePath, path)
+            if (!file.exists()) {
+                errors.add("File not found: $path")
+                continue
+            }
+
+            try {
+                var content = file.readText()
+                var fileModified = false
+
+                for (edit in fileEdits) {
+                    val searchPattern = edit["search_pattern"]
+                    val replacement = edit["replacement"]
+
+                    if (searchPattern != null && replacement != null) {
+                        try {
+                            val regex = Regex(searchPattern)
+                            if (regex.containsMatchIn(content)) {
+                                content = regex.replace(content, replacement)
+                                fileModified = true
+                                successfulEdits++
+                                logger.info("  - Applied edit in $path for pattern: $searchPattern")
+                            } else {
+                                // Silent failure is better for batch regexes that might not apply to every file in a glob
+                                // logger.warn("  - Pattern not found in $path: $searchPattern") 
+                            }
+                        } catch (e: Exception) {
+                            errors.add("Invalid regex in $path: $searchPattern")
+                        }
+                    }
+                }
+
+                if (fileModified) {
+                    file.writeText(content)
+                }
+            } catch (e: Exception) {
+                errors.add("Failed to process file $path: ${e.message}")
+            }
+        }
+
+        if (successfulEdits > 0) {
+             val message = if (errors.isEmpty()) {
+                 "Successfully applied $successfulEdits edits."
+             } else {
+                 "Successfully applied $successfulEdits edits. Warnings: ${errors.joinToString("; ")}"
+             }
+             return ToolResult(success = true, data = message)
+        } else {
+             if (errors.isEmpty()) {
+                 return ToolResult(success = false, error = "No edits were applied (patterns matched nothing).")
+             } else {
+                 return ToolResult(success = false, error = "Failed to apply any edits. Errors: ${errors.joinToString("; ")}")
+             }
+        }
+    }
+
+    private fun filterExistingPaths(params: Map<String, Any>): ToolResult {
+        val paths = params["paths"] as? List<String>
+            ?: return ToolResult(success = false, error = "Missing 'paths' parameter. Expected a list of file paths.")
+
+        val existing = mutableListOf<String>()
+        val missing = mutableListOf<String>()
+        for (path in paths) {
+            val file = File(config.basePath, path)
+            if (file.exists()) {
+                existing.add(path)
+            } else {
+                missing.add(path)
+            }
+        }
+        return ToolResult(success = true, data = mapOf("paths" to existing, "missing" to missing))
+    }
+
+    private fun buildGlobMatcher(pattern: String): PathMatcher {
+        return FileSystems.getDefault().getPathMatcher("glob:$pattern")
+    }
+
+    private fun expandGlob(pattern: String, rootDir: File, maxDepth: Int): List<String> {
+        val matcher = buildGlobMatcher(pattern)
+        return rootDir.walkTopDown()
+            .onEnter { !it.name.startsWith(".") && it.name != "build" && it.name != "node_modules" && it.name != "target" }
+            .maxDepth(maxDepth)
+            .filter { file -> matcher.matches(Paths.get(file.relativeTo(rootDir).path)) }
+            .map { it.relativeTo(rootDir).path }
+            .toList()
+    }
+
     private fun createBranchName(params: Map<String, Any>): ToolResult {
         val ticketKey = params["ticket_key"] as? String
             ?: return ToolResult(success = false, error = "Missing 'ticket_key' parameter.")
@@ -131,10 +349,11 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
     private fun editFile(params: Map<String, Any>): ToolResult {
         val path = params["path"] as? String
             ?: return ToolResult(success = false, error = "Missing 'path' parameter.")
-        val changes = params["changes"] as? List<Map<String, String>>
-            ?: return ToolResult(success = false, error = "Missing or invalid 'changes' parameter. Expected a list of change objects.")
+        
+        val edits = params["edits"] as? List<Map<String, String>>
+            ?: return ToolResult(success = false, error = "Missing or invalid 'edits' parameter. Expected a list of objects with 'search_pattern' and 'replacement'.")
 
-        logger.info("Applying ${changes.size} surgical edit(s) to file: $path")
+        logger.info("Applying ${edits.size} surgical edit(s) to file: $path")
 
         val file = File(config.basePath, path)
         if (!file.exists()) {
@@ -144,33 +363,36 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
         var content = file.readText()
         var appliedChanges = 0
 
-        for (change in changes) {
-            val dependency = change["dependency"]
-            val oldVersion = change["current_version"]
-            val newVersion = change["new_version"]
+        for (edit in edits) {
+            val searchPattern = edit["search_pattern"]
+            val replacement = edit["replacement"]
 
-            if (dependency != null && oldVersion != null && newVersion != null) {
-                // Escape special regex characters in the dependency name
-                val escapedDependency = dependency.replace(Regex("[.*+?^\\$\\{\\}\\(\\)|\\[\\]]"), "\\\\$0")
-                // Create a regex to find the dependency and its version
-                // This is a simplified regex. A real agent would use a proper parser.
-                // This regex looks for: dependency ... : 'version' or dependency ... : version
-                val regex = Regex("($escapedDependency.*?:\\s*')?([^']+)'?")
-                val replacement = "$1$newVersion'"
-                
-                if (content.contains(regex)) {
-                    content = content.replace(regex, replacement)
-                    appliedChanges++
-                    logger.info("  - Updated $dependency from $oldVersion to $newVersion")
-                } else {
-                    logger.warn("  - Could not find dependency '$dependency' with version '$oldVersion' in file.")
+            if (searchPattern != null && replacement != null) {
+                try {
+                    val regex = Regex(searchPattern)
+                    if (regex.containsMatchIn(content)) {
+                        content = regex.replace(content, replacement)
+                        appliedChanges++
+                        logger.info("  - Applied edit for pattern: $searchPattern")
+                    } else {
+                        logger.warn("  - Pattern not found: $searchPattern")
+                    }
+                } catch (e: Exception) {
+                    logger.error("  - Invalid regex pattern: $searchPattern", e)
+                    return ToolResult(success = false, error = "Invalid regex pattern: $searchPattern. Error: ${e.message}")
                 }
+            } else {
+                 logger.warn("  - Skipping invalid edit entry: $edit")
             }
         }
 
-        file.writeText(content)
-        logger.info("Successfully applied $appliedChanges out of ${changes.size} changes to $path.")
-        return ToolResult(success = true)
+        if (appliedChanges > 0) {
+            file.writeText(content)
+            logger.info("Successfully applied $appliedChanges out of ${edits.size} edits to $path.")
+            return ToolResult(success = true)
+        } else {
+            return ToolResult(success = false, error = "No edits were applied. Patterns matched nothing in the file.")
+        }
     }
 
     private fun applyPatch(params: Map<String, Any>): ToolResult {

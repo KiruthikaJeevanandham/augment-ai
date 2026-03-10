@@ -40,4 +40,8 @@ echo "[Step 3/3] Executing plan for track '$TRACK_ID'..."
 cd "$PROJECT_DIR"
 env ./gradlew :conductor:run --args="--track-id $TRACK_ID --working-dir $(pwd)"
 
+# 4. Clean up the track directory
+echo "[Cleanup] Removing track directory '$TRACK_ID'..."
+rm -rf "$PROJECT_DIR/conductor/tracks/$TRACK_ID"
+
 echo "--- Conductor Finished ---"

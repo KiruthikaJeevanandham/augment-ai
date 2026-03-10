@@ -53,9 +53,36 @@ class PlanExecutor(
     private fun processParams(params: Map<String, Any>): Map<String, Any> {
         val processed = mutableMapOf<String, Any>()
         for ((key, value) in params) {
-            if (value is String && value.startsWith("{{") && value.endsWith("}}")) {
-                val contextKey = value.substring(2, value.length - 2).trim()
-                processed[key] = resolveContextValue(contextKey)
+            if (value is String) {
+                // Check for single variable replacement (e.g. "{{steps.1.output}}")
+                // We want to preserve the type in this case (e.g. return a Map or List directly)
+                if (value.startsWith("{{") && value.endsWith("}}") && !value.substring(2, value.length - 2).contains("}}")) {
+                    val contextKey = value.substring(2, value.length - 2).trim()
+                    processed[key] = resolveContextValue(contextKey)
+                } else if (value.contains("{{")) {
+                    // String interpolation (e.g. "Analyze this: {{steps.1.output}}")
+                    // In this case, we convert everything to string/JSON
+                    var newValue = value
+                    val regex = Regex("\\{\\{([^}]+)\\}\\}")
+                    newValue = regex.replace(newValue) { matchResult ->
+                        val contextKey = matchResult.groupValues[1].trim()
+                        try {
+                            val resolved = resolveContextValue(contextKey)
+                            if (resolved is String) {
+                                resolved
+                            } else {
+                                // Serialize complex objects (Lists, Maps) to JSON for better LLM comprehension
+                                objectMapper.writeValueAsString(resolved)
+                            }
+                        } catch (e: Exception) {
+                            logger.warn("Failed to resolve context key '$contextKey' in string interpolation: ${e.message}")
+                            matchResult.value // Keep the original {{key}} if resolution fails
+                        }
+                    }
+                    processed[key] = newValue
+                } else {
+                    processed[key] = value
+                }
             } else {
                 processed[key] = value
             }
@@ -87,26 +114,33 @@ class PlanExecutor(
             // If the current value is a JSON string, parse it into a Map first.
             if (currentValue is String) {
                 var jsonString = currentValue.trim()
-                // Strip common markdown code block wrappers from AI-generated text
-                if (jsonString.startsWith("```")) {
-                    jsonString = jsonString.split(Regex("\r?\n")).drop(1).joinToString("\n")
-                    if (jsonString.endsWith("```")) {
-                        jsonString = jsonString.dropLast(3)
-                    }
-                    jsonString = jsonString.trim()
+                
+                // Robust Markdown code block stripping
+                val markdownRegex = Regex("```(?:json)?\\s*([\\s\\S]*?)\\s*```")
+                val match = markdownRegex.find(jsonString)
+                if (match != null) {
+                    jsonString = match.groupValues[1].trim()
                 }
+
                 if (jsonString.startsWith("{")) {
                     currentValue = try {
                         objectMapper.readValue(jsonString, Map::class.java)
                     } catch (e: Exception) {
-                        currentValue // Not valid JSON, proceed as a plain string
+                        logger.warn("Failed to parse JSON for key '$part': ${e.message}. Content: ${jsonString.take(100)}...")
+                        currentValue // Keep as string if parsing fails
                     }
                 }
             }
 
             val valueAsMap = when (currentValue) {
                 is Map<*, *> -> currentValue as Map<String, Any>
-                else -> objectMapper.convertValue(currentValue, Map::class.java) as Map<String, Any>
+                else -> {
+                    try {
+                        objectMapper.convertValue(currentValue, Map::class.java) as Map<String, Any>
+                    } catch (e: Exception) {
+                        throw IllegalStateException("Cannot convert value at '$part' to Map. Value type: ${currentValue?.javaClass?.name}. Error: ${e.message}")
+                    }
+                }
             }
 
             currentValue = valueAsMap[part]
