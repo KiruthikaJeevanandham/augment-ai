@@ -1,0 +1,39 @@
+# Local Development Configuration Template
+# Copy this to local-config.yaml and update with your values
+
+google:
+  api_key: "your-google-api-key-here"
+  api_secret: "your-google-api-secret-here"
+  project_id: "your-gcp-project-id"
+
+gcp:
+  vertex_ai:
+    location: "us-central1"
+    default_model: "gemini-1.5-pro"
+    endpoint: "https://vertex.googleapis.com"
+
+jira:
+  base_url: "your-domain.atlassian.net"
+  username: "your-email@company.com"
+  api_token: "your-jira-api-token"
+  project_key: "PROJ"
+
+github:
+  api_url: "https://api.github.com"
+  token: "your-github-personal-access-token"
+  repo_owner: "your-github-username"
+  repo_name: "your-repo-name"
+  default_branch: "develop"
+
+# For local development, you can override any workflow settings here
+workflow:
+  jira_filters:
+    sprint_only: true
+    statuses: ["In Progress", "To Do"]
+  
+  code_generation:
+    generate_tests: true
+    code_style: "kotlin-conventions"
+  
+  pr_creation:
+    draft_mode: true  # Create draft PRs for local testing
