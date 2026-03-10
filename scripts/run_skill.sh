@@ -41,7 +41,11 @@ cd "$PROJECT_DIR"
 env ./gradlew :conductor:run --args="--track-id $TRACK_ID --working-dir $(pwd)"
 
 # 4. Clean up the track directory
-echo "[Cleanup] Removing track directory '$TRACK_ID'..."
-rm -rf "$PROJECT_DIR/conductor/tracks/$TRACK_ID"
+echo "✅ Skill execution completed."
+echo "📁 Track directory: $TRACK_DIR"
+echo "📄 Verification report: $TRACK_DIR/verification_report.md"
+echo "🧹 Cleaning up track directory..."
+rm -rf "$TRACK_DIR"
+echo "✅ Cleaned up: $TRACK_DIR"
 
 echo "--- Conductor Finished ---"

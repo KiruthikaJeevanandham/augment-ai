@@ -1,6 +1,8 @@
 package com.agentic.conductor.tools
 
 import com.agentic.conductor.models.ToolResult
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.KotlinModule
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.file.FileSystems
@@ -11,6 +13,7 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
 
     override val name: String = "filesystem"
     private val logger = LoggerFactory.getLogger(FileSystemTool::class.java)
+    private val objectMapper = ObjectMapper().registerModule(KotlinModule())
 
     override suspend fun execute(action: String, params: Map<String, Any>): ToolResult {
         return when (action) {
@@ -24,6 +27,7 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
             "apply_surgical_edits" -> applySurgicalEdits(params)
             "filter_existing_paths" -> filterExistingPaths(params)
             "create_branch_name" -> createBranchName(params)
+            "assert_gate_result" -> assertGateResult(params)
             else -> ToolResult(success = false, error = "Action '$action' not supported by FileSystemTool.")
         }
     }
@@ -138,6 +142,39 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
             logger.error("Failed to write to file $path: ${e.message}", e)
             ToolResult(success = false, error = "Failed to write to file: ${e.message}")
         }
+    }
+
+    private fun assertGateResult(params: Map<String, Any>): ToolResult {
+        val report = params["report"] as? String
+            ?: return ToolResult(success = false, error = "Missing 'report' parameter.")
+        val expected = (params["expected"] as? String ?: "PASS").uppercase()
+
+        val jsonBlock = extractJsonBlock(report)
+            ?: return ToolResult(success = false, error = "Verification report missing JSON block with gate_result.")
+
+        val parsed = try {
+            objectMapper.readValue(jsonBlock, Map::class.java) as Map<*, *>
+        } catch (e: Exception) {
+            return ToolResult(success = false, error = "Failed to parse verification JSON block: ${e.message}")
+        }
+
+        val gateResult = parsed["gate_result"]?.toString()?.uppercase()
+            ?: return ToolResult(success = false, error = "Verification JSON missing 'gate_result'.")
+
+        return if (gateResult == expected) {
+            ToolResult(success = true, data = mapOf("gate_result" to gateResult))
+        } else {
+            ToolResult(
+                success = false,
+                error = "Verification gate failed: gate_result='$gateResult' (expected '$expected')."
+            )
+        }
+    }
+
+    private fun extractJsonBlock(raw: String): String? {
+        val markdownRegex = Regex("```(?:json)?\\s*([\\s\\S]*?)\\s*```")
+        val match = markdownRegex.find(raw)
+        return match?.groupValues?.get(1)?.trim()
     }
 
     @Suppress("UNCHECKED_CAST")

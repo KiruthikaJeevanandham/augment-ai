@@ -33,6 +33,7 @@ data class Plan(
  */
 data class PlanStep(
     val step: Int,
+    val name: String? = null,
     val tool: String,
     val action: String,
     val params: Map<String, Any>? = null,

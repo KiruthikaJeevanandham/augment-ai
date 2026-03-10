@@ -64,7 +64,21 @@ class Conductor : CliktCommand(help = "Executes a plan for a given track.") {
             logger.info("Registered tools: ${toolRegistry.keys.joinToString()}")
 
             // 3. Initialize the Plan Executor
-            val executor = PlanExecutor(toolRegistry, initialContext = mapOf("GEMINI_BOOTSTRAP_MODEL" to bootstrapModel, "TICKET_ID" to ticketId))
+            val techStack = System.getenv("TECH_STACK") ?: "unspecified"
+            val targetEnv = System.getenv("TARGET_ENV") ?: "prod"
+            val baseRef = System.getenv("BASE_REF") ?: "origin/develop"
+            val headRef = System.getenv("HEAD_REF") ?: "HEAD"
+            val executor = PlanExecutor(
+                toolRegistry,
+                initialContext = mapOf(
+                    "GEMINI_BOOTSTRAP_MODEL" to bootstrapModel,
+                    "TICKET_ID" to ticketId,
+                    "TECH_STACK" to techStack,
+                    "TARGET_ENV" to targetEnv,
+                    "BASE_REF" to baseRef,
+                    "HEAD_REF" to headRef
+                )
+            )
 
             // 4. Load the Plan
             val planPath = "$workingDir/$tracksPath/$trackId/plan.md"

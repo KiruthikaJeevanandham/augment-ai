@@ -1,0 +1,86 @@
+# Run the prod requirement verification gate as a dedicated workflow.
+
+name: Prod Requirement Verification Gate
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      jira_ticket_id:
+        description: 'The Jira ticket ID to verify against the code changes.'
+        required: true
+        type: string
+      tech_stack:
+        description: 'Tech stack hint for verification (e.g., android, java, node, python).'
+        required: false
+        default: 'unspecified'
+        type: string
+      target_env:
+        description: 'Target environment (e.g., prod, staging).'
+        required: false
+        default: 'prod'
+        type: string
+      base_ref:
+        description: 'Git base ref to compare against.'
+        required: false
+        default: 'origin/develop'
+        type: string
+      head_ref:
+        description: 'Git head ref to compare.'
+        required: false
+        default: 'HEAD'
+        type: string
+      git_ref:
+        description: 'Git ref (branch, tag, or SHA) to checkout for verification.'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  verify-prod-req:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Create Track
+        id: create_track
+        run: |
+          chmod +x ./scripts/create_track.sh
+          output=$(./scripts/create_track.sh prod_req_verification ${{ inputs.jira_ticket_id }})
+          echo "$output"
+          track_id=$(echo "$output" | grep 'Track ID:' | awk '{print $3}')
+          echo "track_id=$track_id" >> $GITHUB_OUTPUT
+
+      - name: Execute Verification Gate
+        run: |
+          echo "Executing verification for Track ID: ${{ steps.create_track.outputs.track_id }}"
+          export GIT_REPO_PATH='${{ github.workspace }}'
+          export TECH_STACK='${{ inputs.tech_stack }}'
+          export TARGET_ENV='${{ inputs.target_env }}'
+          export BASE_REF='${{ inputs.base_ref }}'
+          export HEAD_REF='${{ inputs.head_ref }}'
+          export GCP_PROJECT_ID='${{ secrets.GCP_PROJECT_ID }}'
+          export JIRA_BASE_URL='${{ secrets.JIRA_BASE_URL }}'
+          export JIRA_USERNAME='${{ secrets.JIRA_USERNAME }}'
+          export JIRA_API_TOKEN='${{ secrets.JIRA_API_TOKEN }}'
+
+          ./gradlew :conductor:run --args="--track-id ${{ steps.create_track.outputs.track_id }}"

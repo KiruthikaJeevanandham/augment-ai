@@ -14,10 +14,82 @@ class GitTool(private val config: GitConfig) : Tool {
         return when (action) {
             "create_branch" -> createBranch(params)
             "checkout_branch" -> checkoutBranch(params)
+            "diff" -> diff(params)
+            "verify_ref" -> verifyRef(params)
+            "assert_changes" -> assertChanges(params)
             "commit" -> commit(params)
             "push" -> push(params)
             "create_pr" -> createPr(params)
             else -> ToolResult(success = false, error = "Action '$action' not supported by GitTool.")
+        }
+    }
+
+    private fun assertChanges(params: Map<String, Any>): ToolResult {
+        val files = (params["files"] as? List<*>)?.filterIsInstance<String>()
+            ?: return ToolResult(success = false, error = "Missing 'files' parameter.")
+        val baseRef = params["base_ref"] as? String ?: "unknown"
+        val headRef = params["head_ref"] as? String ?: "unknown"
+
+        return if (files.isEmpty()) {
+            ToolResult(
+                success = false,
+                error = "No changes applied to branch. Base='$baseRef', Head='$headRef'."
+            )
+        } else {
+            ToolResult(success = true, data = mapOf("count" to files.size))
+        }
+    }
+
+    private fun diff(params: Map<String, Any>): ToolResult {
+        val baseRef = params["base_ref"] as? String ?: "HEAD~1"
+        val headRef = params["head_ref"] as? String ?: "HEAD"
+        val mode = (params["mode"] as? String)?.lowercase() ?: "full"
+        val paths = (params["paths"] as? List<*>)?.filterIsInstance<String>().orEmpty()
+
+        val args = mutableListOf("git", "diff")
+        when (mode) {
+            "stat" -> args.add("--stat")
+            "name_only" -> args.add("--name-only")
+            else -> args.add("--unified=3")
+        }
+
+        args.add("$baseRef...$headRef")
+        if (paths.isNotEmpty()) {
+            args.add("--")
+            args.addAll(paths)
+        }
+
+        logger.info("Generating git diff ($mode) between '$baseRef' and '$headRef'...")
+        val result = runCommand(*args.toTypedArray())
+        return if (result.exitCode == 0) {
+            if (mode == "name_only") {
+                val files = result.output
+                    .lineSequence()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .toList()
+                ToolResult(success = true, data = files)
+            } else {
+                ToolResult(success = true, data = result.output)
+            }
+        } else {
+            ToolResult(success = false, error = "Failed to generate diff: ${result.output}")
+        }
+    }
+
+    private fun verifyRef(params: Map<String, Any>): ToolResult {
+        val ref = params["ref"] as? String
+            ?: return ToolResult(success = false, error = "Missing 'ref' parameter.")
+
+        logger.info("Verifying git ref '$ref'...")
+        val result = runCommand("git", "rev-parse", "--verify", ref)
+        return if (result.exitCode == 0) {
+            ToolResult(success = true, data = ref)
+        } else {
+            ToolResult(
+                success = false,
+                error = "Git ref '$ref' not found. Fetch the branch (e.g. 'git fetch origin ${ref.substringAfterLast('/')}') or set BASE_REF to a valid ref."
+            )
         }
     }
 

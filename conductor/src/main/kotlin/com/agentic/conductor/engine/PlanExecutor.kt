@@ -22,7 +22,8 @@ class PlanExecutor(
     suspend fun execute(plan: Plan) {
         logger.info("Starting plan execution...")
         for (step in plan.steps.sortedBy { it.step }) {
-            logger.info("--- Executing Step ${step.step}: [${step.tool}.${step.action}] ---")
+            val stepLabel = step.name ?: "Step ${step.step}"
+            logger.info("--- Executing ${stepLabel}: [${step.tool}.${step.action}] ---")
             val tool = toolRegistry[step.tool]
                 ?: throw IllegalArgumentException("Tool '${step.tool}' not found in registry.")
 
@@ -33,13 +34,17 @@ class PlanExecutor(
             try {
                 val result = tool.execute(step.action, processedParams)
                 if (result.success) {
-                    logger.info("Step ${step.step} executed successfully.")
+                    logger.info("${stepLabel} executed successfully.")
                     if (step.output != null) {
                         executionContext["steps.${step.step}.output"] = result.data!!
-                        logger.info("Stored output for step ${step.step} as '${step.output}'. Data: ${result.data}")
+                        if (step.output == "verification_report" && result.data is String) {
+                            logger.info("Stored output for ${stepLabel} as '${step.output}'. Full report:\n${result.data}")
+                        } else {
+                            logger.info("Stored output for ${stepLabel} as '${step.output}'. Summary: ${summarizeOutput(result.data)}")
+                        }
                     }
                 } else {
-                    logger.error("Step ${step.step} failed: ${result.error}")
+                    logger.error("❌ ${stepLabel} failed: ${result.error}")
                     System.exit(1)
                 }
             } catch (e: Exception) {
@@ -48,6 +53,25 @@ class PlanExecutor(
             }
         }
         logger.info("Plan execution finished.")
+    }
+
+    private fun summarizeOutput(data: Any?): String {
+        return when (data) {
+            null -> "<null>"
+            is String -> {
+                val normalized = data.replace("\n", " ").trim()
+                if (normalized.length > 200) normalized.take(200) + "..." else normalized
+            }
+            is List<*> -> {
+                val sample = data.take(3).joinToString(", ") { it?.toString() ?: "null" }
+                "List(size=${data.size}${if (sample.isNotBlank()) ", sample=[$sample]" else ""})"
+            }
+            is Map<*, *> -> {
+                val keys = data.keys.take(6).joinToString(", ") { it?.toString() ?: "null" }
+                "Map(keys=[${keys}${if (data.size > 6) ", ..." else ""}])"
+            }
+            else -> data.toString()
+        }
     }
 
     private fun processParams(params: Map<String, Any>): Map<String, Any> {
