@@ -17,14 +17,12 @@ dependencies {
     implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.15.2")
 
     // HTTP Client
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-jackson:2.9.0")
-
-    // Google Cloud & Gemini
-    implementation(platform("com.google.cloud:libraries-bom:26.42.0"))
-    implementation("com.google.cloud:google-cloud-aiplatform")
-    implementation("com.google.cloud:google-cloud-vertexai:0.4.0")
-    implementation("com.google.auth:google-auth-library-oauth2-http:1.19.0")
+    
+    // JSON
+    implementation("org.json:json:20231013")
 
     // CLI Argument Parsing
     implementation("com.github.ajalt.clikt:clikt:4.2.1")

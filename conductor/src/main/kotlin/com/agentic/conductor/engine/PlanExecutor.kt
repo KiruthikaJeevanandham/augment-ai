@@ -1,7 +1,6 @@
 package com.agentic.conductor.engine
 
-import com.agentic.conductor.models.Plan
-import com.agentic.conductor.models.ToolResult
+import com.agentic.conductor.models.*
 import com.agentic.conductor.tools.Tool
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
@@ -21,33 +20,147 @@ class PlanExecutor(
 
     suspend fun execute(plan: Plan) {
         logger.info("Starting plan execution...")
-        for (step in plan.steps.sortedBy { it.step }) {
-            logger.info("--- Executing Step ${step.step}: [${step.tool}.${step.action}] ---")
-            val tool = toolRegistry[step.tool]
-                ?: throw IllegalArgumentException("Tool '${step.tool}' not found in registry.")
+        if (plan.isHierarchical()) {
+            executeHierarchical(plan)
+        } else {
+            executeFlat(plan)
+        }
+        logger.info("Plan execution finished.")
+    }
 
-            // Substitute parameters from the context, handling cases where params is null
-            val processedParams = processParams(step.params ?: emptyMap())
-            logger.info("Executing with parameters: ${processedParams.keys.joinToString(", ") { "$it=..." }}")
+    private suspend fun executeHierarchical(plan: Plan) {
+        for (phase in plan.phases!!.sortedBy { it.phase }) {
+            logger.info("\n========== PHASE ${phase.phase}: ${phase.name} ==========")
+            if (phase.description != null) {
+                logger.info("Description: ${phase.description}")
+            }
+            
+            for (task in phase.tasks.sortedBy { it.task }) {
+                logger.info("\n--- Task ${phase.phase}.${task.task}: ${task.name} ---")
+                if (task.description != null) {
+                    logger.info("Description: ${task.description}")
+                }
+                
+                if (task.isLeaf()) {
+                    // Execute direct task action
+                    executeAction(
+                        tool = task.tool!!,
+                        action = task.action!!,
+                        params = task.params ?: emptyMap(),
+                        outputKey = task.output,
+                        label = "Task ${phase.phase}.${task.task}",
+                        contextKey = "phases.${phase.phase}.tasks.${task.task}.output"
+                    )
+                } else {
+                    // Execute subtasks
+                    for (subtask in task.subtasks!!.sortedBy { it.subtask }) {
+                        val subtaskLabel = subtask.name ?: "Subtask ${phase.phase}.${task.task}.${subtask.subtask}"
+                        logger.info("  → ${subtaskLabel}")
+                        executeAction(
+                            tool = subtask.tool,
+                            action = subtask.action,
+                            params = subtask.params ?: emptyMap(),
+                            outputKey = subtask.output,
+                            label = subtaskLabel,
+                            contextKey = "phases.${phase.phase}.tasks.${task.task}.subtasks.${subtask.subtask}.output"
+                        )
+                    }
+                }
+            }
+        }
+    }
 
-            try {
-                val result = tool.execute(step.action, processedParams)
-                if (result.success) {
-                    logger.info("Step ${step.step} executed successfully.")
-                    if (step.output != null) {
-                        executionContext["steps.${step.step}.output"] = result.data!!
-                        logger.info("Stored output for step ${step.step} as '${step.output}'. Data: ${result.data}")
+    private suspend fun executeFlat(plan: Plan) {
+        for (step in plan.steps!!.sortedBy { it.step }) {
+            val stepLabel = step.name ?: "Step ${step.step}"
+            logger.info("--- Executing ${stepLabel}: [${step.tool}.${step.action}] ---")
+            executeAction(
+                tool = step.tool,
+                action = step.action,
+                params = step.params ?: emptyMap(),
+                outputKey = step.output,
+                label = stepLabel,
+                contextKey = "steps.${step.step}.output",
+                continueOnError = step.continueOnError
+            )
+        }
+    }
+
+    private suspend fun executeAction(
+        tool: String,
+        action: String,
+        params: Map<String, Any>,
+        outputKey: String?,
+        label: String,
+        contextKey: String,
+        continueOnError: Boolean = false
+    ) {
+        val toolInstance = toolRegistry[tool]
+            ?: throw IllegalArgumentException("Tool '$tool' not found in registry.")
+
+        val processedParams = processParams(params)
+        logger.info("Executing [$tool.$action] with parameters: ${processedParams.keys.joinToString(", ") { "$it=..." }}")
+
+        try {
+            val result = toolInstance.execute(action, processedParams)
+            if (result.success) {
+                logger.info("$label executed successfully.")
+                if (outputKey != null) {
+                    executionContext[contextKey] = result.data!!
+                    // Also store with legacy key format for backward compatibility
+                    if (contextKey.startsWith("steps.")) {
+                        executionContext[contextKey] = result.data
+                    }
+                    if (outputKey == "verification_report" && result.data is String) {
+                        logger.info("Stored output for $label as '$outputKey'. Full report:\n${result.data}")
+                    } else {
+                        logger.info("Stored output for $label as '$outputKey'. Summary: ${summarizeOutput(result.data)}")
+                    }
+                }
+            } else {
+                if (continueOnError) {
+                    logger.warn("⚠️  $label failed but continuing (continue_on_error=true): ${result.error}")
+                    logger.info("ℹ️  This is expected for renovate branches - will use default dependency-update requirements instead of Jira ticket.")
+                    // Store empty/error result so downstream steps can handle it
+                    if (outputKey != null) {
+                        executionContext[contextKey] = result.error ?: ""
                     }
                 } else {
-                    logger.error("Step ${step.step} failed: ${result.error}")
+                    logger.error("❌ $label failed: ${result.error}")
                     System.exit(1)
                 }
-            } catch (e: Exception) {
-                logger.error("An unexpected error occurred during step ${step.step}: ${e.message}", e)
+            }
+        } catch (e: Exception) {
+            if (continueOnError) {
+                logger.warn("⚠️  An error occurred during $label but continuing (continue_on_error=true): ${e.message}")
+                logger.info("ℹ️  This is expected for renovate branches - will use default dependency-update requirements instead of Jira ticket.")
+                if (outputKey != null) {
+                    executionContext[contextKey] = "Error: ${e.message}"
+                }
+            } else {
+                logger.error("An unexpected error occurred during $label: ${e.message}", e)
                 System.exit(1)
             }
         }
-        logger.info("Plan execution finished.")
+    }
+
+    private fun summarizeOutput(data: Any?): String {
+        return when (data) {
+            null -> "<null>"
+            is String -> {
+                val normalized = data.replace("\n", " ").trim()
+                if (normalized.length > 200) normalized.take(200) + "..." else normalized
+            }
+            is List<*> -> {
+                val sample = data.take(3).joinToString(", ") { it?.toString() ?: "null" }
+                "List(size=${data.size}${if (sample.isNotBlank()) ", sample=[$sample]" else ""})"
+            }
+            is Map<*, *> -> {
+                val keys = data.keys.take(6).joinToString(", ") { it?.toString() ?: "null" }
+                "Map(keys=[${keys}${if (data.size > 6) ", ..." else ""}])"
+            }
+            else -> data.toString()
+        }
     }
 
     private fun processParams(params: Map<String, Any>): Map<String, Any> {

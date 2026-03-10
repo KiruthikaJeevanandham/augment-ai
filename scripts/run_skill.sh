@@ -1,12 +1,14 @@
 #!/bin/bash
 
 # This script provides a single entry point to create and execute a skill track.
+# If Jira ticket ID is not provided, it will be extracted from the current branch name.
 
 set -e
 
-if [ "$#" -ne 2 ]; then
-  echo "Usage: $0 <SKILL_NAME> <JIRA_TICKET_ID>"
+if [ "$#" -lt 1 ]; then
+  echo "Usage: $0 <SKILL_NAME> [JIRA_TICKET_ID]"
   echo "Example: $0 pr_creator WFPLUS-576"
+  echo "If JIRA_TICKET_ID is not provided, it will be extracted from the current branch name."
   exit 1
 fi
 
@@ -19,8 +21,13 @@ echo "--- Starting Conductor ---"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # 1. Create the track and capture its unique ID
-echo "[Step 1/3] Creating track for skill '$SKILL_NAME' and ticket '$JIRA_TICKET_ID'..."
-TRACK_ID=$("$PROJECT_DIR/scripts/create_track.sh" "$SKILL_NAME" "$JIRA_TICKET_ID")
+if [ -z "$JIRA_TICKET_ID" ]; then
+  echo "[Step 1/3] Creating track for skill '$SKILL_NAME' (auto-detecting Jira ticket from branch)..."
+  TRACK_ID=$("$PROJECT_DIR/scripts/create_track.sh" "$SKILL_NAME")
+else
+  echo "[Step 1/3] Creating track for skill '$SKILL_NAME' and ticket '$JIRA_TICKET_ID'..."
+  TRACK_ID=$("$PROJECT_DIR/scripts/create_track.sh" "$SKILL_NAME" "$JIRA_TICKET_ID")
+fi
 echo "Track created with ID: $TRACK_ID"
 
 # 2. Load environment variables from .env file
@@ -41,7 +48,11 @@ cd "$PROJECT_DIR"
 env ./gradlew :conductor:run --args="--track-id $TRACK_ID --working-dir $(pwd)"
 
 # 4. Clean up the track directory
-echo "[Cleanup] Removing track directory '$TRACK_ID'..."
-rm -rf "$PROJECT_DIR/conductor/tracks/$TRACK_ID"
+echo "✅ Skill execution completed."
+echo "📁 Track directory: $TRACK_DIR"
+echo "📄 Verification report: $TRACK_DIR/verification_report.md"
+echo "🧹 Cleaning up track directory..."
+rm -rf "$TRACK_DIR"
+echo "✅ Cleaned up: $TRACK_DIR"
 
 echo "--- Conductor Finished ---"

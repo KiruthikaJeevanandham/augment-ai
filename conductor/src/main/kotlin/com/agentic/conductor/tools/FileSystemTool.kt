@@ -1,6 +1,8 @@
 package com.agentic.conductor.tools
 
 import com.agentic.conductor.models.ToolResult
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.KotlinModule
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.file.FileSystems
@@ -11,6 +13,14 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
 
     override val name: String = "filesystem"
     private val logger = LoggerFactory.getLogger(FileSystemTool::class.java)
+    private val objectMapper = ObjectMapper().registerModule(KotlinModule())
+    companion object {
+        private const val ANSI_RESET = "\u001B[0m"
+        private const val ANSI_GREEN = "\u001B[32m"
+        private const val ANSI_YELLOW = "\u001B[33m"
+        private const val ANSI_RED = "\u001B[31m"
+        private const val ANSI_CYAN = "\u001B[36m"
+    }
 
     override suspend fun execute(action: String, params: Map<String, Any>): ToolResult {
         return when (action) {
@@ -24,6 +34,7 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
             "apply_surgical_edits" -> applySurgicalEdits(params)
             "filter_existing_paths" -> filterExistingPaths(params)
             "create_branch_name" -> createBranchName(params)
+            "assert_gate_result" -> assertGateResult(params)
             else -> ToolResult(success = false, error = "Action '$action' not supported by FileSystemTool.")
         }
     }
@@ -137,6 +148,83 @@ class FileSystemTool(private val config: FileSystemConfig) : Tool {
         } catch (e: Exception) {
             logger.error("Failed to write to file $path: ${e.message}", e)
             ToolResult(success = false, error = "Failed to write to file: ${e.message}")
+        }
+    }
+
+    private fun assertGateResult(params: Map<String, Any>): ToolResult {
+        val report = params["report"] as? String
+            ?: return ToolResult(success = false, error = "Missing 'report' parameter.")
+        val expected = (params["expected"] as? String ?: "PASS").uppercase()
+
+        val jsonBlock = extractJsonBlock(report)
+            ?: return ToolResult(success = false, error = "Verification report missing JSON block with gate_result.")
+
+        val parsed = try {
+            objectMapper.readValue(jsonBlock, Map::class.java) as Map<*, *>
+        } catch (e: Exception) {
+            return ToolResult(success = false, error = "Failed to parse verification JSON block: ${e.message}")
+        }
+
+        val gateResult = parsed["gate_result"]?.toString()?.uppercase()
+            ?: return ToolResult(success = false, error = "Verification JSON missing 'gate_result'.")
+
+        val matchesExpectation = gateResult == expected
+        logGateSummary(parsed, gateResult, matchesExpectation)
+
+        return if (matchesExpectation) {
+            ToolResult(success = true, data = mapOf("gate_result" to gateResult))
+        } else {
+            ToolResult(
+                success = false,
+                error = "Verification gate failed: gate_result='$gateResult' (expected '$expected')."
+            )
+        }
+    }
+
+    private fun extractJsonBlock(raw: String): String? {
+        val markdownRegex = Regex("```(?:json)?\\s*([\\s\\S]*?)\\s*```")
+        val match = markdownRegex.find(raw)
+        return match?.groupValues?.get(1)?.trim()
+    }
+
+    private fun logGateSummary(parsed: Map<*, *>, gateResult: String, matchesExpectation: Boolean) {
+        val missing = (parsed["missing_requirements"] as? List<*>)?.filterNotNull()?.map { it.toString() }.orEmpty()
+        val unexpected = (parsed["unexpected_changes"] as? List<*>)?.filterNotNull()?.map { it.toString() }.orEmpty()
+        val riskLevel = parsed["risk_level"]?.toString()?.uppercase() ?: "UNKNOWN"
+        val notes = parsed["notes"]?.toString() ?: ""
+
+        val formattedJson = try {
+            objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(parsed)
+        } catch (e: Exception) {
+            parsed.toString()
+        }
+
+        val resultColor = if (gateResult == "PASS") ANSI_GREEN else ANSI_RED
+        val riskColor = when (riskLevel) {
+            "LOW" -> ANSI_GREEN
+            "MEDIUM" -> ANSI_YELLOW
+            else -> ANSI_RED
+        }
+
+        val summary = buildString {
+            appendLine("════════════════════════════════════════════════")
+            appendLine("Prod Requirement Verification Gate Summary")
+            appendLine("Result     : ${resultColor}${gateResult}${ANSI_RESET}")
+            appendLine("Risk Level : ${riskColor}${riskLevel}${ANSI_RESET}")
+            appendLine("Missing    : ${if (missing.isEmpty()) "None" else missing.joinToString(", ")}")
+            appendLine("Unexpected : ${if (unexpected.isEmpty()) "None" else unexpected.joinToString(", ")}")
+            if (notes.isNotBlank()) {
+                appendLine("Notes      : $notes")
+            }
+            appendLine("JSON Block :")
+            appendLine("${ANSI_CYAN}${formattedJson}${ANSI_RESET}")
+            appendLine("════════════════════════════════════════════════")
+        }
+
+        if (matchesExpectation) {
+            logger.info(summary)
+        } else {
+            logger.error(summary)
         }
     }
 

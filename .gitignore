@@ -40,3 +40,7 @@ bin/
 
 # Local configuration
 local.properties
+
+# Conductor tracks (ephemeral execution artifacts)
+.conductor/tracks/
+conductor/tracks/

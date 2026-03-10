@@ -14,10 +14,118 @@ class GitTool(private val config: GitConfig) : Tool {
         return when (action) {
             "create_branch" -> createBranch(params)
             "checkout_branch" -> checkoutBranch(params)
+            "diff" -> diff(params)
+            "verify_ref" -> verifyRef(params)
+            "assert_changes" -> assertChanges(params)
             "commit" -> commit(params)
             "push" -> push(params)
             "create_pr" -> createPr(params)
             else -> ToolResult(success = false, error = "Action '$action' not supported by GitTool.")
+        }
+    }
+
+    private fun assertChanges(params: Map<String, Any>): ToolResult {
+        val files = (params["files"] as? List<*>)?.filterIsInstance<String>()
+            ?: return ToolResult(success = false, error = "Missing 'files' parameter.")
+        val baseRef = params["base_ref"] as? String ?: "unknown"
+        val headRef = params["head_ref"] as? String ?: "unknown"
+
+        return if (files.isEmpty()) {
+            ToolResult(
+                success = false,
+                error = "No changes applied to branch. Base='$baseRef', Head='$headRef'."
+            )
+        } else {
+            ToolResult(success = true, data = mapOf("count" to files.size))
+        }
+    }
+
+    private fun diff(params: Map<String, Any>): ToolResult {
+        val baseRef = params["base_ref"] as? String ?: "HEAD~1"
+        val headRef = params["head_ref"] as? String ?: "HEAD"
+        var mode = (params["mode"] as? String)?.lowercase() ?: "full"
+        val paths = (params["paths"] as? List<*>)?.filterIsInstance<String>().orEmpty()
+
+        // For full diffs, check file count first to avoid timeouts on massive diffs
+        if (mode == "full" && paths.isEmpty()) {
+            // Use short timeout for file count check - if even this times out, use stat mode
+            logger.info("Checking file count before generating full diff...")
+            val fileCountResult = runCommandWithTimeout(30, "git", "diff", "--name-only", "$baseRef...$headRef")
+            logger.info("File count check completed with exit code: ${fileCountResult.exitCode}")
+            if (fileCountResult.exitCode == 0) {
+                val fileCount = fileCountResult.output.lines().filter { it.isNotBlank() }.size
+                logger.info("Detected $fileCount files changed")
+                if (fileCount > 200) {
+                    logger.warn("Large diff detected ($fileCount files). Using stat mode instead of full diff to avoid timeout.")
+                    mode = "stat"
+                }
+            } else {
+                // File count check failed or timed out - fall back to stat mode for safety
+                logger.warn("File count check failed or timed out. Using stat mode to avoid potential timeout on full diff.")
+                mode = "stat"
+            }
+        }
+
+        val args = mutableListOf("git", "diff")
+        when (mode) {
+            "stat" -> args.add("--stat")
+            "name_only" -> args.add("--name-only")
+            "shortstat" -> args.add("--shortstat")
+            else -> {
+                args.add("--unified=0")  // No context lines for faster processing
+                args.add("--no-renames")  // Skip rename detection for speed
+                args.add("--no-color")  // Disable color codes for faster parsing
+                args.add("--break-rewrites")  // Treat rewrites as delete+add for clarity
+                args.add("--ignore-space-change")  // Ignore whitespace changes
+                args.add("--output-indicator-new=+")  // Simplify output format
+                args.add("--output-indicator-old=-")
+            }
+        }
+
+        args.add("$baseRef...$headRef")
+        
+        // Always exclude track directories to avoid recursive diff issues
+        // Track files contain embedded diffs that cause git to hang
+        args.add("--")
+        if (paths.isNotEmpty()) {
+            args.addAll(paths)
+        } else {
+            args.add(".")
+        }
+        args.add(":!conductor/tracks")   // Exclude conductor/tracks
+        args.add(":!.conductor/tracks")  // Exclude .conductor/tracks but keep .conductor context files
+
+        logger.info("Generating git diff ($mode) between '$baseRef' and '$headRef'...")
+        val result = runCommand(*args.toTypedArray())
+        return if (result.exitCode == 0) {
+            if (mode == "name_only") {
+                val files = result.output
+                    .lineSequence()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .toList()
+                ToolResult(success = true, data = files)
+            } else {
+                ToolResult(success = true, data = result.output)
+            }
+        } else {
+            ToolResult(success = false, error = "Failed to generate diff: ${result.output}")
+        }
+    }
+
+    private fun verifyRef(params: Map<String, Any>): ToolResult {
+        val ref = params["ref"] as? String
+            ?: return ToolResult(success = false, error = "Missing 'ref' parameter.")
+
+        logger.info("Verifying git ref '$ref'...")
+        val result = runCommand("git", "rev-parse", "--verify", ref)
+        return if (result.exitCode == 0) {
+            ToolResult(success = true, data = ref)
+        } else {
+            ToolResult(
+                success = false,
+                error = "Git ref '$ref' not found. Fetch the branch (e.g. 'git fetch origin ${ref.substringAfterLast('/')}') or set BASE_REF to a valid ref."
+            )
         }
     }
 
@@ -127,6 +235,10 @@ class GitTool(private val config: GitConfig) : Tool {
     }
 
     private fun runCommand(vararg command: String): CommandResult {
+        return runCommandWithTimeout(300, *command)
+    }
+
+    private fun runCommandWithTimeout(timeoutSeconds: Long, vararg command: String): CommandResult {
         try {
             val process = ProcessBuilder(*command)
                 .directory(File(config.workingDirectory))
@@ -134,9 +246,9 @@ class GitTool(private val config: GitConfig) : Tool {
                 .redirectError(ProcessBuilder.Redirect.PIPE)
                 .start()
 
-            if (!process.waitFor(60, TimeUnit.SECONDS)) {
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
                 process.destroy()
-                return CommandResult(1, "Command timed out.")
+                return CommandResult(1, "Command timed out after ${timeoutSeconds}s.")
             }
 
             val output = process.inputStream.bufferedReader().readText().trim()
@@ -145,11 +257,10 @@ class GitTool(private val config: GitConfig) : Tool {
             return if (process.exitValue() == 0) {
                 CommandResult(0, output)
             } else {
-                CommandResult(process.exitValue(), error.ifEmpty { output })
+                CommandResult(process.exitValue(), if (error.isNotEmpty()) error else output)
             }
         } catch (e: Exception) {
-            logger.error("Failed to run command '${command.joinToString(" ")}': ${e.message}", e)
-            return CommandResult(1, "Failed to execute command: ${e.message}")
+            return CommandResult(1, "Error executing command: ${e.message}")
         }
     }
 

@@ -1,6 +1,6 @@
-# This is a generic workflow to execute any skill track.
+# Generic workflow to execute any Agentic AI Conductor skill.
 
-name: Execute Conductor Track
+name: Run Agentic AI Conductor Skill
 
 on:
   workflow_dispatch:
@@ -26,14 +26,16 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v1
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up Google Cloud SDK
-        uses: google-github-actions/setup-gcloud@v1
+      
+      - name: Verify Google API Key
+        run: |
+          if [ -z "${{ secrets.GOOGLE_API_KEY }}" ]; then
+            echo "❌ Error: GOOGLE_API_KEY secret not configured"
+            echo "Please add GOOGLE_API_KEY to repository secrets"
+            echo "Get your API key from: https://aistudio.google.com/app/apikey"
+            exit 1
+          fi
+          echo "✅ Google API Key configured"
 
       - name: Set up GitHub CLI
         run: sudo apt-get update && sudo apt-get install -y gh
@@ -55,7 +57,7 @@ jobs:
         run: |
           echo "Executing plan for Track ID: ${{ steps.create_track.outputs.track_id }}"
           # Load secrets into environment
-          export GCP_PROJECT_ID='${{ secrets.GCP_PROJECT_ID }}'
+          export GOOGLE_API_KEY='${{ secrets.GOOGLE_API_KEY }}'
           export JIRA_BASE_URL='${{ secrets.JIRA_BASE_URL }}'
           export JIRA_USERNAME='${{ secrets.JIRA_USERNAME }}'
           export JIRA_API_TOKEN='${{ secrets.JIRA_API_TOKEN }}'

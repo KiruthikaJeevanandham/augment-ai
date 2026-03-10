@@ -14,21 +14,12 @@ This repository contains an instruction-driven agentic AI system powered by a pl
 
 - Java 17+
 - Gradle 8+
-- Google Cloud SDK (for Gemini/Vertex AI)
 - GitHub CLI (`gh`) (for creating pull requests)
-- A GCP project with Vertex AI enabled
+- Google API Key (get from https://aistudio.google.com/app/apikey)
 - A Jira project
 - A GitHub repository
 
 ### 1. Set Up Authentication & Environment
-
-**For GCP:**
-
-Authenticate with Google Cloud. This allows the `GeminiTool` to access Vertex AI.
-```bash
-gcloud auth application-default login
-gcloud config set project YOUR_GCP_PROJECT_ID
-```
 
 **For GitHub:**
 
@@ -44,8 +35,8 @@ Create a `.env` file in the root of the project and add your secrets. This file 
 ```sh
 # .env file
 
-# GCP Project ID
-GCP_PROJECT_ID="your-gcp-project-id"
+# Google API Key (get from https://aistudio.google.com/app/apikey)
+GOOGLE_API_KEY="AIzaSyD..."
 
 # (Optional) The initial model used to select other models. Use a model you know is available.
 GEMINI_BOOTSTRAP_MODEL="gemini-pro"

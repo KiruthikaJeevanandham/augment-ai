@@ -1,17 +1,23 @@
 package com.agentic.conductor.tools
 
 import com.agentic.conductor.models.ToolResult
-import com.google.cloud.aiplatform.v1.ModelServiceClient
-import com.google.cloud.aiplatform.v1.ModelServiceSettings
-import com.google.cloud.vertexai.VertexAI
-import com.google.cloud.vertexai.generativeai.GenerativeModel
-import com.google.cloud.vertexai.generativeai.ResponseHandler
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import org.slf4j.LoggerFactory
+import java.util.concurrent.TimeUnit
 
 class GeminiTool(private val config: GeminiConfig) : Tool {
 
     override val name: String = "gemini"
     private val logger = LoggerFactory.getLogger(GeminiTool::class.java)
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
 
     override suspend fun execute(action: String, params: Map<String, Any>): ToolResult {
         return when (action) {
@@ -26,45 +32,74 @@ class GeminiTool(private val config: GeminiConfig) : Tool {
             ?: return ToolResult(success = false, error = "Missing 'prompt' parameter.")
         val modelName = params["model"] as? String ?: config.defaultModel
 
-        logger.info("Generating text with Gemini model: $modelName")
+        logger.info("Generating text with Gemini model: $modelName using Google API Key")
+        
+        return generateTextWithApiKey(prompt, modelName)
+    }
+    
+    private fun generateTextWithApiKey(prompt: String, modelName: String): ToolResult {
         return try {
-            val vertexAI = VertexAI(config.projectId, config.location)
-            val model = GenerativeModel(modelName, vertexAI)
-                        val response = model.generateContent(prompt)
-            val responseText = ResponseHandler.getText(response)
-            logger.info("Successfully generated text with Gemini.")
-            ToolResult(success = true, data = responseText)
+            val apiKey = config.apiKey!!
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
+            
+            val requestBody = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", prompt)
+                            })
+                        })
+                    })
+                })
+            }
+            
+            val request = Request.Builder()
+                .url(url)
+                .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: "Unknown error"
+                    logger.error("API Key request failed: $errorBody")
+                    return ToolResult(success = false, error = "API request failed: ${response.code} - $errorBody")
+                }
+                
+                val responseBody = response.body?.string() ?: ""
+                val jsonResponse = JSONObject(responseBody)
+                val text = jsonResponse
+                    .getJSONArray("candidates")
+                    .getJSONObject(0)
+                    .getJSONObject("content")
+                    .getJSONArray("parts")
+                    .getJSONObject(0)
+                    .getString("text")
+                
+                logger.info("Successfully generated text with API Key.")
+                ToolResult(success = true, data = text)
+            }
         } catch (e: Exception) {
-            logger.error("Failed to generate text with Gemini: ${e.message}", e)
-            ToolResult(success = false, error = "Failed to generate text: ${e.message}")
+            logger.error("Failed to generate text with API Key: ${e.message}", e)
+            ToolResult(success = false, error = "Failed to generate text with API Key: ${e.message}")
         }
     }
 
     private fun listModels(): ToolResult {
-        logger.info("Listing available models from Vertex AI...")
-        return try {
-            val settings = ModelServiceSettings.newBuilder()
-                .setEndpoint("${config.location}-aiplatform.googleapis.com:443")
-                .build()
-
-            ModelServiceClient.create(settings).use { client ->
-                val parent = "projects/${config.projectId}/locations/${config.location}"
-                val models = client.listModels(parent).iterateAll()
-                    .map { it.name }
-                    .filter { it.contains("gemini") } // Filter for Gemini models
-                    .toList()
-                logger.info("Found ${models.size} Gemini models.")
-                ToolResult(success = true, data = models)
-            }
-        } catch (e: Exception) {
-            logger.error("Failed to list models: ${e.message}", e)
-            ToolResult(success = false, error = "Failed to list models: ${e.message}")
-        }
+        logger.info("Listing available Gemini models")
+        return ToolResult(
+            success = true, 
+            data = listOf(
+                "gemini-pro",
+                "gemini-1.5-pro",
+                "gemini-1.5-flash",
+                "gemini-2.0-flash-exp"
+            )
+        )
     }
 }
 
 data class GeminiConfig(
-    val projectId: String,
-    val location: String,
+    val apiKey: String,
     val defaultModel: String = "gemini-pro"
 )
