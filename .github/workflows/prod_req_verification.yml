@@ -40,6 +40,10 @@ on:
       - 'bugfix/**'
       - 'chore/**'
       - 'hotfix/**'
+    branches-ignore:
+      - 'develop'
+      - 'release'
+      - 'main'
     paths-ignore:
       - '**.md'
       - 'docs/**'
