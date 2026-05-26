@@ -1,0 +1,125 @@
+# Product Requirement Verification Workflow
+# Verifies code changes against Jira requirements using Gemini models
+# Works both locally (via script) and remotely (via GitHub Actions)
+
+name: Product Requirement Verification
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Target repo to analyze (owner/repo).'
+        required: true
+        default: 'PeopleNet/agentic-ai-conductor'
+        type: string
+      jira_ticket_id:
+        description: 'The Jira ticket ID to analyze. If not provided, will be extracted from branch name.'
+        required: false
+        type: string
+      base_ref:
+        description: 'Git base ref to compare against.'
+        required: false
+        default: 'origin/develop'
+        type: string
+      head_ref:
+        description: 'Git head ref to compare.'
+        required: false
+        default: 'HEAD'
+        type: string
+  
+  # Auto-trigger on push to feature branches
+  push:
+    branches-ignore:
+      - 'develop'
+      - 'release'
+      - 'main'
+      - 'release/**'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/**'
+
+jobs:
+  verify-product-requirements:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Extract Jira Ticket from Branch Name
+        id: extract_jira
+        run: |
+          # For workflow_dispatch, use input or extract from head_ref
+          # For push events, extract from the pushed branch
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            JIRA_TICKET="${{ inputs.jira_ticket_id }}"
+            BRANCH_NAME="${{ inputs.head_ref }}"
+            TARGET_REPO="${{ inputs.target_repo }}"
+          else
+            BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+            TARGET_REPO="${{ github.repository }}"
+            JIRA_TICKET=""
+          fi
+          
+          # Extract Jira ticket from branch name if not provided
+          if [ -z "$JIRA_TICKET" ]; then
+            JIRA_TICKET=$(echo "$BRANCH_NAME" | grep -oE '[A-Z]+-[0-9]+' | head -n 1)
+          fi
+          
+          if [ -z "$JIRA_TICKET" ]; then
+            echo "Error: Could not extract Jira ticket ID from branch name '$BRANCH_NAME'" >&2
+            echo "Branch name should contain a Jira ticket ID (e.g., PROJ-123)" >&2
+            exit 1
+          fi
+          
+          echo "jira_ticket=$JIRA_TICKET" >> $GITHUB_OUTPUT
+          echo "target_repo=$TARGET_REPO" >> $GITHUB_OUTPUT
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "Extracted Jira ticket: $JIRA_TICKET from branch: $BRANCH_NAME"
+
+      - name: Checkout Target Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.extract_jira.outputs.target_repo }}
+          token: ${{ secrets.PAT_TOKEN }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.head_ref || github.ref }}
+          path: target-repo
+          fetch-depth: 0
+
+      - name: Checkout Conductor Repository
+        uses: actions/checkout@v4
+        with:
+          repository: PeopleNet/agentic-ai-conductor
+          path: conductor-repo
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts
+
+      - name: Install jq
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          
+      - name: Run Product Requirement Verification
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USERNAME: ${{ secrets.JIRA_USERNAME }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          cd conductor-repo
+          chmod +x ./scripts/run_product_requirement_verification.sh
+          
+          TARGET_REPO="${{ github.workspace }}/target-repo"
+          JIRA_TICKET="${{ steps.extract_jira.outputs.jira_ticket }}"
+          BASE_REF="${{ github.event_name == 'workflow_dispatch' && inputs.base_ref || 'origin/develop' }}"
+          HEAD_REF="${{ github.event_name == 'workflow_dispatch' && inputs.head_ref || 'HEAD' }}"
+          
+          ./scripts/run_product_requirement_verification.sh "$TARGET_REPO" "$JIRA_TICKET" "$BASE_REF" "$HEAD_REF"
+
+      - name: Upload Verification Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-requirement-verification-${{ steps.extract_jira.outputs.jira_ticket }}
+          path: target-repo/.conductor/tracks/product_requirement_verification_*.md
+          if-no-files-found: warn

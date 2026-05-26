@@ -1,66 +1,62 @@
-# Agentic AI Conductor
+# Product Requirement Verification Skill
 
-This repository contains an instruction-driven agentic AI system powered by a plan-based execution engine. It is designed to be adaptable to any project by defining tasks in machine-readable `plan.md` files.
+A standalone skill that uses AI (Gemini 2.5 Pro) to verify code changes against Jira requirements. It can be integrated into any application's CI/CD pipeline or used locally by developers.
 
-## Core Architecture
+## Overview
 
-- **Plan Executor**: The heart of the system. It reads a `plan.md` file from a track and executes the defined steps in sequence.
-- **Tools**: A collection of single-purpose modules that the executor can call (e.g., `JiraTool`, `GeminiTool`, `GitTool`, `FileSystemTool`).
-- **Tracks**: Self-contained directories representing a single unit of work. Each track has a `spec.md` (the goal), a `plan.md` (the execution steps), and `metadata.json`.
+This skill analyzes code changes against Jira requirements and categorizes findings into:
 
-## Local Development Setup
+- **Category 1: Straightforward Crucial Cases** - Clear violations that MUST be fixed before merging
+- **Category 2: Edge Cases** - Identifying edge cases for developer verification
+
+## Quick Start
 
 ### Prerequisites
 
-- Java 17+
-- Gradle 8+
-- GitHub CLI (`gh`) (for creating pull requests)
-- Google API Key (get from https://aistudio.google.com/app/apikey)
-- A Jira project
-- A GitHub repository
+- jq
+- Gemini API Key (get from https://aistudio.google.com/app/apikey)
+- Jira credentials (if using Jira integration)
 
-### 1. Set Up Authentication & Environment
-
-**For GitHub:**
-
-Authenticate the GitHub CLI. This allows the `GitTool` to create pull requests.
-```bash
-gh auth login
-```
-
-**For Environment Variables:**
-
-Create a `.env` file in the root of the project and add your secrets. This file provides credentials to the tools.
-
-```sh
-# .env file
-
-# Google API Key (get from https://aistudio.google.com/app/apikey)
-GOOGLE_API_KEY="AIzaSyD..."
-
-# (Optional) The initial model used to select other models. Use a model you know is available.
-GEMINI_BOOTSTRAP_MODEL="gemini-pro"
-
-# Jira Credentials
-JIRA_BASE_URL="https://your-domain.atlassian.net"
-JIRA_USERNAME="your-jira-email"
-JIRA_API_TOKEN="your-jira-api-token"
-
-# GitHub - The GitTool uses the GitHub CLI ('gh') for PRs, which uses its own auth.
-# A token is not needed here unless you add a tool that uses it directly.
-```
-
-### 2. Run a Skill
-
-To run a skill, use the `run_skill.sh` script. This script automates the entire process of track creation and execution.
+### Local Execution
 
 ```bash
-# Usage: ./scripts/run_skill.sh <SKILL_NAME> <JIRA_TICKET_ID>
-./scripts/run_skill.sh pr_creator WFPLUS-576
+# Run on current branch (auto-detects Jira ticket)
+./scripts/run_product_requirement_verification.sh /path/to/repo
+
+# Run with specific Jira ticket
+./scripts/run_product_requirement_verification.sh /path/to/repo PROJ-123
 ```
 
-This single command will:
-1.  Create a new track with a unique ID.
-2.  Generate the `spec.md` and `plan.md` for the specified skill.
-3.  Load your credentials from the `.env` file.
-4.  Execute the plan, running all the steps from start to finish.
+### GitHub Actions Integration
+
+Copy the workflow file to your repository:
+
+```bash
+cp .github/workflows/product-requirement-verification.yml <your-repo>/.github/workflows/
+```
+
+Add the required secrets to your repository:
+- `GOOGLE_API_KEY`
+- `JIRA_BASE_URL`
+- `JIRA_USERNAME`
+- `JIRA_API_TOKEN`
+
+## Documentation
+
+- **Skill Documentation**: `skills/prod_requirement_verification.md`
+- **Setup Instructions**: `docs/setup.md`
+- **Execution Script**: `scripts/run_product_requirement_verification.sh`
+- **GitHub Actions**: `.github/workflows/product-requirement-verification.yml`
+
+## Features
+
+- Direct Gemini API integration (no additional dependencies)
+- Auto-detects Jira ticket from branch name
+- Auto-detects tech stack from project files
+- Categorizes violations into crucial and edge cases
+- Generates detailed markdown reports with JSON summary
+- Works both locally and in CI/CD
+
+## License
+
+MIT
